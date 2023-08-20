@@ -1,5 +1,35 @@
 from arango import ArangoClient
+from arango.http import DefaultHTTPClient
 import time
+
+
+
+
+kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
+originalGraphName = 'merged_full'
+this_method = 'LabelProp'
+#method = 'Attribute'
+selected_attribute = 'category'
+reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'merged_kg_nodes'
+originalEdgeCollectionName = 'merged_kg_edges'
+reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+
+
+'''
+
+kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
+originalGraphName = 'tiny'
+method = 'LabelProp'
+method = 'Attribute'
+selected_attribute = 'category'
+reducedGraphName = 'reduced_'+originalGraphName+'_'+method
+originalNodeCollectionName = 'kg_25_nodes'
+originalEdgeCollectionName = 'kg_20_edges'
+reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+method
+reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+method
+
 
 miserablesDatabase = "w-541c3500f9944ce395537e09a61b8b97"
 originalGraphName = 'miserables'
@@ -10,16 +40,6 @@ originalNodeCollectionName = 'characters'
 originalEdgeCollectionName = 'relationships'
 reducedNodeCollectionName = 'reducedNodes_'+method
 reducedEdgeCollectionName = 'reducedEdges_'+method
-'''
-
-kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
-originalGraphName = 'tiny'
-method = 'SpeakerListener'
-reducedGraphName = 'reduced_'+originalGraphName
-originalNodeCollectionName = 'kg_25_nodes'
-originalEdgeCollectionName = 'kg_20_edges'
-reducedNodeCollectionName = originalNodeCollectionName+'_reduced'
-reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced'
 
 eurovisDatabase = 'w-f3bcbd142a0b405687cd82a068f26c39'
 originalGraphName = 'eurovis'
@@ -66,10 +86,17 @@ def AddCommunityDetection(method,arango_db,graphName):
 
 
 def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,originalNodeCollectionName, reducedGraphName,reducedEdgeCollectionName,reducedNodeCollectionName,
-                          nameField="name",method='SpeakerListener',thresholdGuidance=0.8):
- 
+                          nameField="name",method='SpeakerListener',thresholdGuidance=0.8,selected_attribute = None):
+
+
+    # instantiate custom client to allow long reads for large datasets
+    class MyCustomHTTPClient(DefaultHTTPClient):
+        REQUEST_TIMEOUT = 1000 # Set the timeout you want in seconds here
+
     # Initialize the client for ArangoDB.
-    client = ArangoClient(hosts="http://localhost:8529")
+    client = ArangoClient(
+        hosts="http://localhost:8529",
+        http_client=MyCustomHTTPClient())
     # Connect to "miserables" database as root user.
     db = client.db(databaseName, username="root", password="letmein")
 
@@ -79,10 +106,11 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     sample_node = [document for document in cursor]
     print('extracted ',len(sample_node),' sample from', originalNodeCollectionName+' in the '+ originalGraphName +' graph')
 
+    print('selected method')
     # now add attributes if they are needed and are not already present in the source graph
-    if method == "SpeakerListener" and '_community_SLPA' not in sample_node:
+    if method.lower() == "Speakerlistener" and '_community_SLPA' not in sample_node:
         AddCommunityDetection(method,db,originalGraphName)
-    elif method == "LabelPropogation" and '_community_LP' not in sample_node:
+    elif method.lower() == "labelprop" and '_community_LP' not in sample_node:
         AddCommunityDetection(method,db,originalGraphName)
 
 
@@ -118,10 +146,12 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     # which touch a node that has a different community type than it is.  This is the subset
     # of all the nodes in the graph, which we want to have in our simplified graph
 
-    if method == 'SpeakerListener':
+    if method.lower() == 'speakerlistener':
         method_attribute = '_community_SLPA'
-    elif method == "LabelProp":
+    elif method.lower() == "labelprop":
         method_attribute = '_community_LP'
+    elif (method.lower() == 'attribute') and selected_attribute != None:
+        method_attribute = selected_attribute
 
     query_str = 'RETURN UNIQUE(\
                     FOR n in '+originalNodeCollectionName+' \
@@ -222,14 +252,15 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
                     UPDATE @nodeDict[n] \
                     INTO '+reducedNodeCollectionName
     print('entering nodes into new collection')
-    cursor = db.aql.execute(query=query_str,bind_vars=bind_vars)
+    #************* not outputting a modified node collection anymore
+    #cursor = db.aql.execute(query=query_str,bind_vars=bind_vars)
 
     # create an output edge collection of the reduced edges only. However, there is 
     # a problem: the reducedNodes have different IDs than the original nodes 
     # but the edges reference the original nodes.  Our NodeDictByKey about has the 
     # same _key values as the original nodes, so lets just change the _from and _to 
     # references from the original collection name to the new collection name
-
+    
     fixed_interior_edges = []
     for edge in interior_edges:
         fixed_edge = {}
@@ -246,6 +277,7 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
             elif attrib not in ['_id','_key']:
                 fixed_edge[attrib] = edge[attrib]
         fixed_interior_edges.append(fixed_edge)
+    
 
     # now do the query to add these edges to the new edge collection
     bind_vars = {"edgesUsed": fixed_interior_edges}
@@ -256,14 +288,14 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
 
 
-#CreateSimplifiedGraph(kg_db,originalGraphName,originalEdgeCollectionName,
-#                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName
-#                      )
+CreateSimplifiedGraph(kg_db,originalGraphName,originalEdgeCollectionName,
+                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
+                      method=this_method,nameField='_key', selected_attribute=selected_attribute)
  
 
-CreateSimplifiedGraph(miserablesDatabase,originalGraphName,originalEdgeCollectionName,
-                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
-                      method=method)
+#CreateSimplifiedGraph(miserablesDatabase,originalGraphName,originalEdgeCollectionName,
+#                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
+#                      method=method)
 
 #CreateSimplifiedGraph(eurovisDatabase,originalGraphName,originalEdgeCollectionName,
 #                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
