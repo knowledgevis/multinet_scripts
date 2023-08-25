@@ -5,6 +5,38 @@ import time
 
 
 
+
+
+
+
+
+
+
+kg_db = "w-541c3500f9944ce395537e09a61b8b97"
+originalGraphName = 'miserables'
+this_method = 'SpeakerListener'
+#this_method = 'LabelProp'
+#this_method = 'Attribute'
+selected_attribute = '_degree'
+reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'characters'
+originalEdgeCollectionName = 'relationships'
+reducedNodeCollectionName = 'reducedNodes_'+this_method
+reducedEdgeCollectionName = 'reducedEdges_'+this_method
+
+'''
+kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
+originalGraphName = 'tiny'
+#this_method = 'LabelProp'
+this_method = 'Attribute'
+selected_attribute = 'category'
+reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'kg_25_nodes'
+originalEdgeCollectionName = 'kg_20_edges'
+reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+
+
 kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
 originalGraphName = 'merged_full'
 this_method = 'LabelProp'
@@ -16,30 +48,6 @@ originalEdgeCollectionName = 'merged_kg_edges'
 reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
 reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
 
-
-'''
-
-kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
-originalGraphName = 'tiny'
-method = 'LabelProp'
-method = 'Attribute'
-selected_attribute = 'category'
-reducedGraphName = 'reduced_'+originalGraphName+'_'+method
-originalNodeCollectionName = 'kg_25_nodes'
-originalEdgeCollectionName = 'kg_20_edges'
-reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+method
-reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+method
-
-
-miserablesDatabase = "w-541c3500f9944ce395537e09a61b8b97"
-originalGraphName = 'miserables'
-method = 'SpeakerListener'
-#method = 'LabelProp'
-reducedGraphName = 'reduced_'+originalGraphName+'_'+method
-originalNodeCollectionName = 'characters'
-originalEdgeCollectionName = 'relationships'
-reducedNodeCollectionName = 'reducedNodes_'+method
-reducedEdgeCollectionName = 'reducedEdges_'+method
 
 eurovisDatabase = 'w-f3bcbd142a0b405687cd82a068f26c39'
 originalGraphName = 'eurovis'
@@ -89,14 +97,10 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
                           nameField="name",method='SpeakerListener',thresholdGuidance=0.8,selected_attribute = None):
 
 
-    # instantiate custom client to allow long reads for large datasets
-    class MyCustomHTTPClient(DefaultHTTPClient):
-        REQUEST_TIMEOUT = 1000 # Set the timeout you want in seconds here
 
     # Initialize the client for ArangoDB.
     client = ArangoClient(
-        hosts="http://localhost:8529",
-        http_client=MyCustomHTTPClient())
+        hosts="http://localhost:8529")
     # Connect to "miserables" database as root user.
     db = client.db(databaseName, username="root", password="letmein")
 
@@ -153,6 +157,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     elif (method.lower() == 'attribute') and selected_attribute != None:
         method_attribute = selected_attribute
 
+    '''
+    # this query takes too long for large graphs, so break it up to process nodes in batches
     query_str = 'RETURN UNIQUE(\
                     FOR n in '+originalNodeCollectionName+' \
                         FOR k \
@@ -162,10 +168,116 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
                             filter n.@selectionAttribute != k.@selectionAttribute \
                             return k) \
         '
-    bind_vars = {'selectionAttribute': method_attribute}
+    '''
+
+
+    # we will break up the nodes into batches
+    batchsize = 10
+    numberOfBatches = (len(node_names)//batchsize)
+    print('number of batches:',numberOfBatches)
+    # start with an empty set for the nodes.  We will add to it incrementally with each batch
+    nodeKeySet = {}
+    for b in range(numberOfBatches):
+        print('batch',b)
+        batch = node_names[b*batchsize:(b+1)*batchsize]
+        print('batch contents:',batch)
+        # perform a query where we feed in a batch of node Ids.  We create a small batch because traversing
+        # every node in the graph at once takes too long for large graphs.  In our loop, we look up the node
+        # by name and assign it as the startNode.  Then we traverse one-hop from the startNode and output any
+        # nodes we encounter that have a different selectionAttribute than our current node (because they are
+        # boundary nodes that are connected. )
+        query_str = '''
+                RETURN UNIQUE(For nodeKey in @node_keys
+                    LET Start = (FOR doc in @@nodeCollection
+                        FILTER doc.@nameField == nodeKey
+                        RETURN doc)
+                    FOR k 
+                        in 1..1 
+                        any Start[0]._id 
+                        graph @originalGraphName
+                        filter Start[0].@selectionAttribute != k.@selectionAttribute 
+                        return k)
+            '''
+        bind_vars = {'node_keys': batch, '@nodeCollection': originalNodeCollectionName,
+                     'selectionAttribute':method_attribute,'nameField':nameField, 'originalGraphName':originalGraphName}
+        cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
+        boundary_node_return = [doc for doc in cursor]
+        print('length of boundary_node_return',len(boundary_node_return[0]))
+        #print('boundary_node_return',boundary_node_return)
+        # there could be duplicates from a previous batch, so assign to a dictionary to remove duplicates
+        for node in boundary_node_return[0]:
+            nodeKeySet[node['_key']] = node 
+        print('length of nodeKeySet',len(nodeKeySet))
+        print('nodeKeySet:',nodeKeySet)
+
+    # there is a last partial batch of nodes left, run this smaller final query on lefover nodes
+    remainingNodeCount = len(node_names) - numberOfBatches*batchsize 
+    print('now processing the remaining',remainingNodeCount,'nodes')
+    batch = node_names[numberOfBatches*batchsize:len((node_names))]
+    print('batch contents:',batch)
+    # perform a query where we feed in a batch of node Ids.  We create a small batch because traversing
+    # every node in the graph at once takes too long for large graphs.  In our loop, we look up the node
+    # by name and assign it as the startNode.  Then we traverse one-hop from the startNode and output any
+    # nodes we encounter that have a different selectionAttribute than our current node (because they are
+    # boundary nodes that are connected. )
+    query_str = '''
+            RETURN UNIQUE(For nodeKey in @node_keys
+                LET Start = (FOR doc in @@nodeCollection
+                    FILTER doc.@nameField == nodeKey
+                    RETURN doc)
+                FOR k 
+                    in 1..1 
+                    any Start[0]._id 
+                    graph @originalGraphName
+                    filter Start[0].@selectionAttribute != k.@selectionAttribute 
+                    return k)
+        '''
+    bind_vars = {'node_keys': batch, '@nodeCollection': originalNodeCollectionName,
+                    'selectionAttribute':method_attribute,'nameField':nameField, 'originalGraphName':originalGraphName}
     cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
     boundary_node_return = [doc for doc in cursor]
-    boundary_node_list = boundary_node_return[0]
+    print('length of boundary_node_return',len(boundary_node_return[0]))
+    print('boundary_node_return',boundary_node_return)
+    # eliminate duplicates that were in previous batches
+    for node in boundary_node_return[0]:
+        nodeKeySet[node['_key']] = node 
+    print('final length of nodeKeySet',len(nodeKeySet.keys()))
+    print('nodeKeySet:',nodeKeySet)
+
+    # make a list containing only the boundary nodes
+    boundary_node_list = []
+    for key in nodeKeySet.keys():
+        boundary_node_list.append(nodeKeySet[key])
+
+    #------------need to use iterators here like this
+    '''
+      edges = network.edges()
+        # loop until there are no more batches waiting
+        if edges.has_more():
+            while edges.has_more():
+                while not edges.empty():
+                    edge = edges.next()
+                    edge_list.append(edge)
+                # advance to the last partial batch
+                edges.fetch()
+        # get the last partial batch
+        while not edges.empty():
+            edge = edges.next()
+            edge_list.append(edge)
+   
+    while cursor.has_more():
+        while not cursor.empty():
+            doc = cursor.next()
+            boundary_node_list.append(doc)
+        cursor.fetch()
+    #get the last partial batch
+    while not cursor.empty():
+        doc = cursor.next()
+        boundary_node_list.append(doc)
+
+     '''
+    #-----------
+
     #print(' *** node list returned')
     #print(node_name_list[0])
     print('sample node:',boundary_node_list[0])
@@ -290,7 +402,7 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
 
 CreateSimplifiedGraph(kg_db,originalGraphName,originalEdgeCollectionName,
                       originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
-                      method=this_method,nameField='_key', selected_attribute=selected_attribute)
+                      method=this_method,nameField='_id', selected_attribute=selected_attribute)
  
 
 #CreateSimplifiedGraph(miserablesDatabase,originalGraphName,originalEdgeCollectionName,
