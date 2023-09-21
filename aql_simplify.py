@@ -3,6 +3,38 @@ from arango.http import DefaultHTTPClient
 import time
 
 
+'''
+databaseName = kg_db = 'w-3c7dda4d9d2b4f5087c40ca6292aacef'
+originalGraphName = 'kg_n737_e5000'
+#this_method = 'LabelProp'
+this_method = 'SpeakerListener'
+#this_method = 'Attribute'
+selected_attribute = '_degree'
+threshold = 1
+if this_method == 'Attribute':
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+selected_attribute+'_'+str(threshold)
+else:
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'kg_n737_e5000__kg_nodes_737_cleaned'
+originalEdgeCollectionName = 'kg_n737_e5000__kg_edges_5000'
+reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+
+
+databaseName = kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
+originalGraphName = 'merged_full'
+#this_method = 'LabelProp'
+#this_method = 'SpeakerListener'
+this_method = 'Attribute'
+selected_attribute = 'category'
+threshold = None
+reducedGraphName = 'reduced_'+originalGraphName+'_'+selected_attribute
+originalNodeCollectionName = 'merged_kg_nodes'
+originalEdgeCollectionName = 'merged_kg_edges'
+reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+
+
 
 databaseName = kg_db = "w-541c3500f9944ce395537e09a61b8b97"
 originalGraphName = 'miserables'
@@ -16,22 +48,6 @@ originalNodeCollectionName = 'characters'
 originalEdgeCollectionName = 'relationships'
 reducedNodeCollectionName = 'reducedNodes_'+this_method
 reducedEdgeCollectionName = 'reducedEdges_'+this_method
-
-'''
-dbName = kg_db = 'w-70e8ac78da6041349894f13349faa7a1'
-originalGraphName = 'merged_full'
-this_method = 'LabelProp'
-this_method = 'SpeakerListener'
-#method = 'Attribute'
-selected_attribute = 'category'
-reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
-originalNodeCollectionName = 'merged_kg_nodes'
-originalEdgeCollectionName = 'merged_kg_edges'
-reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
-reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
-
-
-
 databaseName = kg_db = "w-541c3500f9944ce395537e09a61b8b97"
 originalGraphName = 'miserables'
 this_method = 'SpeakerListener'
@@ -161,6 +177,101 @@ def AddAllGraphMetrics(arangodb,graphName,nodeColl=None):
     AddGraphAnalyticAttributeToNodes('pageRank','_pagerank',arangodb,graphName)
     AddGraphAnalyticAttributeToNodes('degree','_degree',arangodb,graphName,nodeColl)
 
+# create a derived network that represents the existing network without any floating edges or unconnected nodes
+def network_remove_floating_nodes_and_edges(databaseName,originalGraphName,originalEdgeCollectionName,originalNodeCollectionName, 
+                                            reducedGraphName,reducedEdgeCollectionName,reducedNodeCollectionName):
+      # Initialize the client for ArangoDB.
+    client = ArangoClient(
+        hosts="http://localhost:8529")
+    # Connect to "miserables" database as root user.
+    db = client.db(databaseName, username="root", password="letmein")
+
+      # create the output collections if they don't exist.  We will make a new regular
+    # collection for the nodes and a new edge collection for the new edges.  The new
+    # edges will connect between nodes of the new output node collection
+
+    if db.has_collection(reducedNodeCollectionName):
+        db.delete_collection(reducedNodeCollectionName)
+    newNodeCol = db.create_collection(reducedNodeCollectionName)
+
+    if db.has_graph(reducedGraphName):
+        existingGraph = db.graph(reducedGraphName)
+        if existingGraph.has_edge_definition(reducedEdgeCollectionName):
+            existingGraph.delete_edge_definition(reducedEdgeCollectionName,purge=True)
+        db.delete_graph(reducedGraphName)
+    newGraph = db.create_graph(reducedGraphName)
+
+    if not newGraph.has_edge_definition(reducedEdgeCollectionName):
+        newEdgeCol = newGraph.create_edge_definition(
+            edge_collection= reducedEdgeCollectionName,
+            from_vertex_collections=[reducedNodeCollectionName],
+            to_vertex_collections=[reducedNodeCollectionName]
+        )
+
+    print('gathering all the edges')
+    all_edges = []
+    bind_vars = {"@EdgeCollName": originalEdgeCollectionName}
+    query_str = 'FOR e in @@EdgeCollName RETURN e'
+    cursor = db.aql.execute(query=query_str, bind_vars=bind_vars,batch_size=10000)
+    all_edges = [doc for doc in cursor]
+    if cursor.has_more():
+       while cursor.has_more():
+        while not cursor.empty():
+            edges = cursor.next()
+            for edge in cursor:
+                all_edges.append(edge)
+        print('edge count is:',len(all_edges))
+        cursor.fetch()
+    # get the last partial batch
+    while not cursor.empty():
+        edges = cursor.next()
+        for edge in cursor:
+            all_edges.append(edge)
+    print('total edge count is:',len(all_edges))
+
+    # find all the nodes that are referenced from these edges. This may be a superset 
+    # of the nodes in the network.  We will intersect this nodesUsedSet with the nodes in the node collection later.
+    nodesUsedSet = set()
+    for e in all_edges:
+        nodesUsedSet.add(e['_from'])
+        nodesUsedSet.add(e['_to'])
+    print('length of nodesUsedSet',len(nodesUsedSet))
+
+    # retreive node keys for all nodes in the node collection
+    query_str = 'FOR doc in @@nodeCollection RETURN doc._key'              
+    bind_vars = {'@nodeCollection': originalNodeCollectionName}
+    cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
+    collection_node_set = set()
+    for doc in cursor:
+        collection_node_set.add(doc)
+    print('found ',len(collection_node_set),'nodes declared in the node collection')
+
+    # find the truly used nodes in the graph by making sure a node is used in an end and
+    # also in the node collection.  We do this by making sure the node was also used by an
+    # edge.  This way we end up with a strict subset of the included nodes, which were used
+    # by edges. 
+    truly_used_nodeset = set()
+    for node in collection_node_set:
+        if node in nodesUsedSet:
+            truly_used_nodeset.add(node)
+
+    # now that we have the truly used nodes, lets thin the edges by including only edges between
+    # truly used nodes
+    print('calculating interior edges from full edge set')
+    nodeIdsSet = set(nodeIds)
+    truly_used_edges = []
+    for e in all_edges:
+        if (e['_from'] in truly_used_nodeset) and (e['_to'] in truly_used_nodeset):
+            truly_used_edges.append(e)
+    print('count of interior edges:',len(truly_used_edges))
+    if len(truly_used_edges)>0:
+        print('sample interior edge',truly_used_edges[0])
+
+
+
+
+    
+
 def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,originalNodeCollectionName, reducedGraphName,reducedEdgeCollectionName,reducedNodeCollectionName,
                           nameField="name",method='SpeakerListener',selected_attribute = None,batchsize=1000,
                           selectByThreshold=False,threshold=0.5,createOutputCollections=False):
@@ -171,6 +282,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     # Connect to "miserables" database as root user.
     db = client.db(databaseName, username="root", password="letmein")
 
+
+    '''  (Assume metrics are already in place and simplify this code)
     # depending on he method used to reduce the graph, we need to check if the nodes
     # already have the proper attributes.  We pull one node and look at its attributes.
     cursor = db.aql.execute("FOR doc IN "+ originalNodeCollectionName + " LIMIT 1 RETURN doc")
@@ -179,11 +292,11 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
 
     print('selected method')
     # now add attributes if they are needed and are not already present in the source graph
-    if method.lower() == "Speakerlistener" and '_community_SLPA' not in sample_node[0]:
-        AddGraphAnalyticAttributesToNodes(method,db,originalGraphName)
+    if method.lower() == "speakerlistener" and '_community_SLPA' not in sample_node[0]:
+        AddGraphAnalyticAttributeToNodes('SpeakerListener','_community_SLPA',db,originalGraphName)
     elif method.lower() == "labelprop" and '_community_LP' not in sample_node[0]:
-        AddGraphAnalyticAttributesToNodes(method,db,originalGraphName)
-
+        AddGraphAnalyticAttributeToNodes('LabelProp','_community_LP',db,originalGraphName)
+    '''
 
     # create the output collections if they don't exist.  We will make a new regular
     # collection for the nodes and a new edge collection for the new edges.  The new
@@ -223,6 +336,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
         method_attribute = '_community_LP'
     elif (method.lower() == 'attribute') and selected_attribute != None:
         method_attribute = selected_attribute
+    else:
+        print('incorrect settings discovered. Please review the method and appropriate parameters')
 
     '''
     # this query takes too long for large graphs, so break it up to process nodes in batches
@@ -252,7 +367,7 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     else:
         # we will break up the nodes into batches, using the batchsize argument
         numberOfBatches = (len(node_names)//batchsize)
-        print('number of batches:',numberOfBatches)
+        print('number of full batches:',numberOfBatches)
         # start with an empty set for the nodes.  We will add to it incrementally with each batch
         nodeKeySet = {}
         for b in range(numberOfBatches):
@@ -330,7 +445,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
             boundary_node_list.append(nodeKeySet[key])
 
     # ----------- end of batch breakup method
-    print('sample node:',boundary_node_list[0])
+    if len(boundary_node_list)>0:
+        print('sample node:',boundary_node_list[0])
     print('found ',len(boundary_node_list),'boundary nodes')
 
 
@@ -403,7 +519,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
         if (e['_from'] in nodeIdsSet) and (e['_to'] in nodeIdsSet) and (nodeDict[e['_from']][method_attribute] != nodeDict[e['_to']][method_attribute]):
             interior_edges.append(e)
     print('count of interior edges:',len(interior_edges))
-    print('sample interior edge',interior_edges[0])
+    if len(interior_edges)>0:
+        print('sample interior edge',interior_edges[0])
 
     # now that we have the edges that are connecting disparate community nodes, let us
     # just keep only the nodes that have an incident edge.  Some nodes might have become unused
@@ -507,16 +624,45 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     print('algorithm is complete')
 
 
+
+
+
+
+databaseName = kg_db = 'w-09e8f51bf51f45008b70f903f6920d5c'
+originalGraphName = 'eurovis-2019'
+#this_method = 'LabelProp'
+#this_method = 'SpeakerListener'
+this_method = 'Attribute'
+selected_attribute = '_betweenness'
+threshold = 0.015
+if this_method == 'Attribute':
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+selected_attribute+'_'+str(threshold)
+else:
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'people'
+originalEdgeCollectionName = 'connections'
+if this_method == 'Attribute':
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+else:
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
+
+
+
+
+
 client = ArangoClient(hosts="http://localhost:8529")
-# Connect to "miserables" database as root user.
+# Connect to the Arango database as root user.
 db = client.db(databaseName, username="root", password="letmein")
 
-#AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
 
+AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
 
-CreateSimplifiedGraph(kg_db,originalGraphName,originalEdgeCollectionName,
+CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
                       originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
-                      method=this_method,nameField='_id', selected_attribute=selected_attribute,threshold=threshold,createOutputCollections=True)
+                      method=this_method,nameField='_id', 
+                      selected_attribute=selected_attribute,threshold=threshold,createOutputCollections=True)
  
 
 #CreateSimplifiedGraph(miserablesDatabase,originalGraphName,originalEdgeCollectionName,
