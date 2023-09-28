@@ -1,6 +1,8 @@
 from arango import ArangoClient
 from arango.http import DefaultHTTPClient
 import time
+import arrow
+import pandas as pd
 
 
 '''
@@ -172,7 +174,7 @@ def AddGraphAnalyticAttributeToNodes(method,attributeName,arango_db,graphName,no
 # run background jobs to add graph metrics to all nodes in a graph. 
 def AddAllGraphMetrics(arangodb,graphName,nodeColl=None):
     AddGraphAnalyticAttributeToNodes('betweenness','_betweenness',arangodb,graphName)
-    AddGraphAnalyticAttributeToNodes('labelpropogation','_community_LP',arangodb,graphName)
+    AddGraphAnalyticAttributeToNodes('labelprop','_community_LP',arangodb,graphName)
     AddGraphAnalyticAttributeToNodes('SpeakerListener','_community_SLPA',arangodb,graphName)
     AddGraphAnalyticAttributeToNodes('pageRank','_pagerank',arangodb,graphName)
     AddGraphAnalyticAttributeToNodes('degree','_degree',arangodb,graphName,nodeColl)
@@ -282,6 +284,7 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
     # Connect to "miserables" database as root user.
     db = client.db(databaseName, username="root", password="letmein")
 
+    starttime = arrow.now()
 
     '''  (Assume metrics are already in place and simplify this code)
     # depending on he method used to reduce the graph, we need to check if the nodes
@@ -352,7 +355,7 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
         '
     '''
 
-    if threshold:
+    if threshold and method.lower()=='attribute':
         # the method of simplification is to include nodes with values over a threshold, this is a smpler 
         # query so the nodes of the graph can be traversed directly, even for large graphs
         query_str = '''
@@ -557,6 +560,8 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
             if attrib != '_id':
                 nodeDictByKey[nodeName][attrib] = nodeDict[nodeKey][attrib]
 
+    # record when the algorithm is done (without Arango output collection creation)
+    reductionTime = arrow.now()
 
     # loop through the node dictionary and insert these nodes into a new output collection
     # This is done in two steps because we are preserving the _key values from the original collection.
@@ -622,12 +627,17 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
         cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
 
     print('algorithm is complete')
+    stoptime = arrow.now()
+
+    algorithmTime = reductionTime-starttime
+    totalTime = stoptime-starttime
+    print('algorithm time:',algorithmTime)
+    print('total time:',totalTime)
+
+    return len(uniqueNodes), len(interior_edges)
 
 
-
-
-
-
+'''
 databaseName = kg_db = 'w-09e8f51bf51f45008b70f903f6920d5c'
 originalGraphName = 'eurovis-2019'
 #this_method = 'LabelProp'
@@ -647,7 +657,28 @@ if this_method == 'Attribute':
 else:
     reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
     reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
+'''
 
+
+databaseName = kg_db = 'graph_test'
+originalGraphName = 'inet_july06'
+this_method = 'LabelProp'
+this_method = 'SpeakerListener'
+this_method = 'Attribute'
+selected_attribute = '_betweenness'
+threshold = 0.0001
+if this_method == 'Attribute':
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+selected_attribute+'_'+str(threshold)
+else:
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'inet_july06_verts'
+originalEdgeCollectionName = 'inet_july06_edges'
+if this_method == 'Attribute':
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+else:
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
 
 
 
@@ -657,18 +688,51 @@ client = ArangoClient(hosts="http://localhost:8529")
 db = client.db(databaseName, username="root", password="letmein")
 
 
-AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
+#AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
 
+'''
 CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
                       originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
                       method=this_method,nameField='_id', 
                       selected_attribute=selected_attribute,threshold=threshold,createOutputCollections=True)
- 
+''' 
 
-#CreateSimplifiedGraph(miserablesDatabase,originalGraphName,originalEdgeCollectionName,
-#                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
-#                      method=method)
 
-#CreateSimplifiedGraph(eurovisDatabase,originalGraphName,originalEdgeCollectionName,
-#                      originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
-#                      nameField='screen_name')
+# make looping test for a graph to try different reductions
+methodList = ['labelprop','speakerlistener','attribute']
+attributes = ['_degree','_betweenness','_pagerank']
+
+
+doOutput = False
+resultsList = []
+AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
+for method in methodList:
+    if method == 'attribute':
+        for attrib in attributes:
+            # start with initial and then divide by ten until reaching the final
+            if attrib == '_degree':
+                thresholdBoundary = [10000,5]
+            else:
+                thresholdBoundary = [0.5,1e-6]
+            threshold = thresholdBoundary[0]
+            while threshold > thresholdBoundary[1]:
+                numNodes,numEdges = CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
+                        originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
+                        method=method,nameField='_id', 
+                        selected_attribute=attrib,threshold=threshold,createOutputCollections=doOutput)
+                resultRec = {'method':method,'attribute':attrib,'threshold':threshold,'nodes':numNodes,'edges':numEdges}
+                resultsList.append(resultRec)
+                threshold = threshold / 10.0
+    else:
+        attrib = ''
+        threshold=0
+        numNodes,numEdges = CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
+                    originalNodeCollectionName, reducedGraphName, reducedEdgeCollectionName,reducedNodeCollectionName,
+                    method=method,nameField='_id', 
+                    selected_attribute=attrib,threshold=threshold,createOutputCollections=doOutput)
+    resultRec = {'method':method,'attribute':'N/A','threshold':0,'nodes':numNodes,'edges':numEdges}
+    resultsList.append(resultRec)
+
+resultsDF = pd.DataFrame(resultsList)
+resultsDF.to_csv(originalGraphName+'_results.csv',index=False)
+
