@@ -397,7 +397,9 @@ def CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionN
                 '''
             bind_vars = {'node_keys': batch, '@nodeCollection': originalNodeCollectionName,
                         'selectionAttribute':method_attribute,'nameField':nameField, 'originalGraphName':originalGraphName}
+            print('finding boundary nodes, using attribute:',method_attribute)
             cursor = db.aql.execute(query=query_str, bind_vars=bind_vars)
+            print('complete')
             boundary_node_return = [doc for doc in cursor]
             #print('length of boundary_node_return',len(boundary_node_return[0]))
             #print('boundary_node_return',boundary_node_return)
@@ -659,7 +661,7 @@ else:
     reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
 '''
 
-
+'''
 databaseName = kg_db = 'graph_test'
 originalGraphName = 'inet_july06'
 this_method = 'LabelProp'
@@ -679,14 +681,33 @@ if this_method == 'Attribute':
 else:
     reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
     reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
+'''
 
+databaseName = kg_db = 'graph_test'
+originalGraphName = 'hyves'
+this_method = 'LabelProp'
+this_method = 'SpeakerListener'
+this_method = 'Attribute'
+selected_attribute = '_betweenness'
+threshold = 0.0001
+if this_method == 'Attribute':
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+selected_attribute+'_'+str(threshold)
+else:
+    reducedGraphName = 'reduced_'+originalGraphName+'_'+this_method
+originalNodeCollectionName = 'hyves_verts'
+originalEdgeCollectionName = 'hyves_edges'
+if this_method == 'Attribute':
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method
+else:
+    reducedNodeCollectionName = originalNodeCollectionName+'_reduced_'+this_method
+    reducedEdgeCollectionName = originalEdgeCollectionName + '_reduced_'+this_method   
 
 
 
 client = ArangoClient(hosts="http://localhost:8529")
 # Connect to the Arango database as root user.
 db = client.db(databaseName, username="root", password="letmein")
-
 
 #AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
 
@@ -696,16 +717,19 @@ CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
                       method=this_method,nameField='_id', 
                       selected_attribute=selected_attribute,threshold=threshold,createOutputCollections=True)
 ''' 
-
+databaseList = [{'dbname':'inet_july06','nodes':'inet_july06_verts','edges':'inet_july06_edges'}]
 
 # make looping test for a graph to try different reductions
 methodList = ['labelprop','speakerlistener','attribute']
+methodList = ['attribute']
 attributes = ['_degree','_betweenness','_pagerank']
-
 
 doOutput = False
 resultsList = []
-AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
+
+
+#AddAllGraphMetrics(db,originalGraphName,originalNodeCollectionName)
+
 for method in methodList:
     if method == 'attribute':
         for attrib in attributes:
@@ -713,7 +737,8 @@ for method in methodList:
             if attrib == '_degree':
                 thresholdBoundary = [10000,5]
             else:
-                thresholdBoundary = [0.5,1e-6]
+                #maxThresh = find_percentage(originalNodeCollectionName,)
+                thresholdBoundary = [0.005,1e-8]
             threshold = thresholdBoundary[0]
             while threshold > thresholdBoundary[1]:
                 numNodes,numEdges = CreateSimplifiedGraph(databaseName,originalGraphName,originalEdgeCollectionName,
